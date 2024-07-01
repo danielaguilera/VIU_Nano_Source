@@ -1,0 +1,128 @@
+#include <Wire.h>
+#include <Adafruit_MMA8451.h>
+#include <Adafruit_Sensor.h>
+
+Adafruit_MMA8451 mma1 = Adafruit_MMA8451(0x1D);
+Adafruit_MMA8451 mma2 = Adafruit_MMA8451(0x1C);  // Dirección I2C cambiada
+
+const int BUTTON_PIN = 2;  // Pulsador conectado a D2
+const int LED_PIN = 4;     // LED conectado a D4
+bool startAcquisition = false;
+volatile bool readSensorFlag = false;  // Bandera para indicar cuando leer el sensor
+bool lastButtonState = LOW;  // Estado anterior del pulsador
+
+void setup() 
+{
+  Serial.begin(19200);  // Inicializa la comunicación serie con la Raspberry Pi
+  
+  pinMode(BUTTON_PIN, INPUT);  // Configura el pin del pulsador como entrada
+  pinMode(LED_PIN, OUTPUT);    // Configura el pin del LED como salida
+  
+  digitalWrite(LED_PIN, LOW);  // Asegurar que el LED esté apagado inicialmente
+
+  if (!mma1.begin())
+  {
+    Serial.println("Error de comunicación con MMA8451 (0x1D)");
+    while (1);  // Detiene el bucle si no inicia 
+  }
+  if (!mma2.begin())
+  {
+    Serial.println("Error de comunicación con MMA8451 (0x1C)");
+    while (1);  // Detiene el bucle si no inicia 
+  }
+  
+  mma1.setDataRate(MMA8451_DATARATE_100_HZ);
+  mma1.setRange(MMA8451_RANGE_4_G);
+  mma2.setDataRate(MMA8451_DATARATE_100_HZ);
+  mma2.setRange(MMA8451_RANGE_4_G);
+  Serial.println("MMA8451 configurados y listos!");
+
+  // Configuración de Timer1 para interrupción cada 10 ms
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  OCR1A = 155;  
+  TCCR1B |= (1 << WGM12);  // Modo CTC
+  TCCR1B |= (1 << CS12) | (1 << CS10);  // Preescalador de 1024
+  TIMSK1 |= (1 << OCIE1A);  // Habilitar interrupción por comparación de Timer1
+  interrupts();
+}
+
+ISR(TIMER1_COMPA_vect)  // Rutina de interrupción del Timer1
+{
+  readSensorFlag = true;  // Establecer la bandera para indicar que es hora de leer el sensor
+}
+
+void loop()
+{
+  bool currentButtonState = digitalRead(BUTTON_PIN);
+  if (currentButtonState == HIGH && lastButtonState == LOW)
+  {
+    startAcquisition = !startAcquisition;  // Cambia el estado de adquisición (toggle)
+    digitalWrite(LED_PIN, startAcquisition ? HIGH : LOW);  // Enciende o apaga el LED según el estado de adquisición
+
+    delay(500);  // Debounce delay
+  }
+  lastButtonState = currentButtonState;  // Actualiza el estado anterior del pulsador
+
+  if (startAcquisition && readSensorFlag)
+  {
+    mma1.read();
+    mma2.read();
+
+    // Obtener los valores del primer acelerómetro
+    int16_t accelerometer1X = mma1.x;
+    int16_t accelerometer1Y = mma1.y;
+    int16_t accelerometer1Z = mma1.z;
+
+    // Obtener los valores del segundo acelerómetro
+    int16_t accelerometer2X = mma2.x;
+    int16_t accelerometer2Y = mma2.y;
+    int16_t accelerometer2Z = mma2.z;
+
+    // Enviar los datos al puerto serie de la Raspberry Pi
+    Serial.write('!'); // Carácter que indica a la Raspberry Pi iniciar la lectura
+    Serial.write((uint8_t*)&accelerometer1X, sizeof(accelerometer1X));
+    Serial.write((uint8_t*)&accelerometer1Y, sizeof(accelerometer1Y));
+    Serial.write((uint8_t*)&accelerometer1Z, sizeof(accelerometer1Z));
+    Serial.write((uint8_t*)&accelerometer2X, sizeof(accelerometer2X));
+    Serial.write((uint8_t*)&accelerometer2Y, sizeof(accelerometer2Y));
+    Serial.write((uint8_t*)&accelerometer2Z, sizeof(accelerometer2Z));
+    Serial.write('\n');
+    
+    // Restablecer la bandera 'readSensorFlag'.
+    readSensorFlag = false;
+  }
+}
+
+void displayData()
+{
+  // Read the 'raw' data in 14-bit counts
+  mma1.read();
+  Serial.print("Sensor 1 - X:\t"); Serial.print(mma1.x); 
+  Serial.print("\tY:\t"); Serial.print(mma1.y); 
+  Serial.print("\tZ:\t"); Serial.print(mma1.z); 
+  Serial.println();
+
+  mma2.read();
+  Serial.print("Sensor 2 - X:\t"); Serial.print(mma2.x); 
+  Serial.print("\tY:\t"); Serial.print(mma2.y); 
+  Serial.print("\tZ:\t"); Serial.print(mma2.z); 
+  Serial.println();
+
+  /* Get a new sensor event */ 
+  sensors_event_t event; 
+  mma1.getEvent(&event);
+
+  /* Display the results (acceleration is measured in m/s^2) */
+  Serial.print("Sensor 1 - X: \t"); Serial.print(event.acceleration.x); Serial.print("\t");
+  Serial.print("Y: \t"); Serial.print(event.acceleration.y); Serial.print("\t");
+  Serial.print("Z: \t"); Serial.print(event.acceleration.z); Serial.print("\t");
+  Serial.println("m/s^2 ");
+
+  mma2.getEvent(&event);
+  Serial.print("Sensor 2 - X: \t"); Serial.print(event.acceleration.x); Serial.print("\t");
+  Serial.print("Y: \t"); Serial.print(event.acceleration.y); Serial.print("\t");
+  Serial.print("Z: \t"); Serial.print(event.acceleration.z); Serial.print("\t");
+  Serial.println("m/s^2 ");
+}
