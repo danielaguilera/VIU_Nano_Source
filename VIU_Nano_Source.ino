@@ -5,6 +5,13 @@
 #include <Wire.h>
 #include <Adafruit_MMA8451.h>
 #include <Adafruit_Sensor.h>
+#include <SoftwareSerial.h>
+
+#define PERIOD_MILLIS 500
+
+const int TX_HC05RXD = 11;
+const int RX_HC05TXD = 12;
+SoftwareSerial btSerial(RX_HC05TXD, TX_HC05RXD);
 
 Adafruit_MMA8451 mma = Adafruit_MMA8451();
 
@@ -14,9 +21,12 @@ bool startAcquisition = false;
 volatile bool readSensorFlag = false;  // Bandera para indicar cuando leer el sensor
 bool lastButtonState = LOW;  // Estado anterior del pulsador
 
+long lastMillis = millis();
+
 void setup() 
 {
-  Serial.begin(19200);  // Inicializa la comunicación serie con la Raspberry Pi
+  Serial.begin(9600);  // Inicializa la comunicación serie con la Raspberry Pi (19200 baudios)
+  btSerial.begin(9600);
   
   pinMode(BUTTON_PIN, INPUT);  // Configura el pin del pulsador como entrada
   pinMode(LED_PIN, OUTPUT);    // Configura el pin del LED como salida
@@ -74,11 +84,21 @@ void loop()
     int16_t accelerometerZ = mma.z;
 
     // Enviar los datos al puerto serie de la Raspberry Pi
-    Serial.write('!'); // Carácter que indica a la Raspberry Pi iniciar la lectura
-    Serial.write((uint8_t*)&accelerometerX, sizeof(accelerometerX));
-    Serial.write((uint8_t*)&accelerometerY, sizeof(accelerometerY));
-    Serial.write((uint8_t*)&accelerometerZ, sizeof(accelerometerZ));
-    Serial.write('\n');
+    //Serial.write('!'); // Carácter que indica a la Raspberry Pi iniciar la lectura
+    //Serial.write((uint8_t*)&accelerometerX, sizeof(accelerometerX));
+    //Serial.write((uint8_t*)&accelerometerY, sizeof(accelerometerY));
+    //Serial.write((uint8_t*)&accelerometerZ, sizeof(accelerometerZ));
+    //Serial.write('\n');
+    Serial.print('!');
+    Serial.println(accelerometerZ);
+
+    // Enviar datos BT
+    if (millis() - lastMillis >= PERIOD_MILLIS) {
+      btSerial.print('!');
+      btSerial.println(accelerometerZ);
+      lastMillis = millis();      
+    }
+
     
     // Restablecer la bandera 'readSensorFlag'.
     readSensorFlag = false;
