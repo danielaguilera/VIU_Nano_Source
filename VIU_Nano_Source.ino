@@ -1,136 +1,122 @@
-// A la fecha del 05-02-2024, el presente codigo permite un resgisto adecuado del sensor mma8451
-// presenta una decuando funcionamiento entre el pulsador y el accionamiento del led 
-// la frecuencia de muestre medido mediante analizador logico es aprox 100 HZ
+/* 
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Código para leer 2 acelerómetros MMA8451.
+Se incorpora un botón para iniciar y finalizar la lectura. Además, una luz del indicadora de estado (On/Off).
+El codigo y hardwares asociados, fueron testeados con un analziador lógico para verificar que la frecuencia de muestreo sea de 100 Hz.
+
+### Acelerometro 1 ####
+Vi --> Vi arduino
+GND --> GND arduino
+SCL --> SCL arduino
+SDA --> SDA arduino
+A0 --> GND arduino (genera la direccion 0x1C)
+
+### Acelerometro 2 ####
+Vi --> Vi arduino
+GND --> GND arduino
+SCL --> SCL arduino
+SDA --> SDA arduino
+A0 --> 3.3V arduino (genera la direccion 0x1D)
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+*/
 
 #include <Wire.h>
 #include <Adafruit_MMA8451.h>
 #include <Adafruit_Sensor.h>
 
-Adafruit_MMA8451 mma = Adafruit_MMA8451();
+// Creación de instancias de los acelerómetros MMA8451, especificando las direcciones I2C
+Adafruit_MMA8451 mma1 = Adafruit_MMA8451(0x1D);
+Adafruit_MMA8451 mma2 = Adafruit_MMA8451(0x1C);
 
-const int BUTTON_PIN = 2;  // Pulsador conectado a D2
-const int LED_PIN = 4;     // LED conectado a D4
-bool startAcquisition = false;
-volatile bool readSensorFlag = false;  // Bandera para indicar cuando leer el sensor
-bool lastButtonState = LOW;  // Estado anterior del pulsador
+// Definición de los pines para el botón y el LED
+const int BUTTON_PIN = 2;
+const int LED_PIN = 4;
 
-void setup() 
-{
-  Serial.begin(19200);  // Inicializa la comunicación serie con la Raspberry Pi
-  
-  pinMode(BUTTON_PIN, INPUT);  // Configura el pin del pulsador como entrada
-  pinMode(LED_PIN, OUTPUT);    // Configura el pin del LED como salida
-  
-  digitalWrite(LED_PIN, LOW);  // Asegurar que el LED esté apagado inicialmente
+// Variables para el manejo de la interrupción y el control de la adquisición de datos
+volatile bool readSensorFlag = false; // Bandera para leer los sensores, modificada en la ISR (Rutina de Servicio de Interrupción)
+bool startAcquisition = false; // Control para el inicio/fin de la adquisición de datos
+bool lastButtonState = LOW; // Estado anterior del botón para detectar flancos
+unsigned long lastDebounceTime = 0; // Tiempo para controlar el rebote del botón
 
-  if (!mma.begin(0x1C))
-  {
-    Serial.println("Error de comunicación MM8451");
-    while (1);  // Detiene el bucle si no inicia 
+void setup() {
+  Serial.begin(74880); // Inicio de la comunicación serial a 74880 baudios para transmitir datos (mantener o subir)
+  pinMode(BUTTON_PIN, INPUT); // Conf.Pin del botón como entrada
+  pinMode(LED_PIN, OUTPUT); // Conf.Pin del led como salida
+  digitalWrite(LED_PIN, LOW); // Iniciar con led apagado
+
+ // Inicialización de los acelerómetros
+  if (!mma1.begin(0x1D) || !mma2.begin(0x1C)) { // Verificar la conexión con los acelerómetros
+    Serial.println("Error en iniciar MMA8451"); // Mensaje de error si no se conectan
+    while (1); // Bucle infinito si la conexión falla
   }
-  
-  mma.setDataRate(MMA8451_DATARATE_100_HZ);
-  mma.setRange(MMA8451_RANGE_4_G);
-  Serial.println("MMA8451 configurado y listo!");
+  mma1.setRange(MMA8451_RANGE_4_G); // Configura el mma1 para medir en un rango de hasta ±4g
+  mma1.setDataRate(MMA8451_DATARATE_100_HZ); // Configura la tasa de muestreo a 100 Hz del mma1
+  mma2.setRange(MMA8451_RANGE_4_G); // Configura el mma2 para medir en un rango de hasta ±4g
+  mma2.setDataRate(MMA8451_DATARATE_100_HZ); // Configura la tasa de muestreo a 100 Hz del mma2
 
-  // Configuración de Timer1 para interrupción cada 10 ms
-  noInterrupts();
-  TCCR1A = 0;
+ // Configuración del Timer1 para generar interrupciones cada 10 ms (100 Hz)
+  noInterrupts(); // Detención de interrupciones durante la configuración
+  TCCR1A = 0; // Configuración del Timer1 en modo normal
   TCCR1B = 0;
-  OCR1A = 155;  
-  TCCR1B |= (1 << WGM12);  // Modo CTC
-  TCCR1B |= (1 << CS12) | (1 << CS10);  // Preescalador de 1024
-  TIMSK1 |= (1 << OCIE1A);  // Habilitar interrupción por comparación de Timer1
-  interrupts();
+  OCR1A = 2499;  // // Valor para el comparador A del Timer1. Ajuste correcto para 100Hz con un preescalador de 64 
+  TCCR1B |= (1 << WGM12);  // Modo CTC (Clear Timer on Compare Match)
+  TCCR1B |= (1 << CS11) | (1 << CS10);  // Preescalador a 64. Divide la frecuencia del reloj principal del uC para reducir la frecuencia con la que se incrementa el contador del timer
+  TIMSK1 |= (1 << OCIE1A); // Habilitación de la interrupción por comparación del Timer
+  interrupts(); // Reanuda las interrupciones
 }
 
-ISR(TIMER1_COMPA_vect)  // Rutina de interrupción del Timer1
-{
-  readSensorFlag = true;  // Establecer la bandera para indicar que es hora de leer el sensor
+// Rutina de Servicio de Interrupción (ISR) para Timer1
+ISR(TIMER1_COMPA_vect) {
+  readSensorFlag = true; // Establece la bandera para leer datos en el loop principal
 }
-
-void loop()
-{
-  bool currentButtonState = digitalRead(BUTTON_PIN);
-  if (currentButtonState == HIGH && lastButtonState == LOW)
-  {
-    startAcquisition = !startAcquisition;  // Cambia el estado de adquisición (toggle)
-    digitalWrite(LED_PIN, startAcquisition ? HIGH : LOW);  // Enciende o apaga el LED según el estado de adquisición
-
-    delay(500);  // Debounce delay
+// Bucle principal
+void loop() {
+  // Lectura y debouncing del botón
+  bool currentButtonState = digitalRead(BUTTON_PIN); // Lee el estado actual del botón
+  if (currentButtonState != lastButtonState && (millis() - lastDebounceTime) > 500) {
+    lastButtonState = currentButtonState; // Actualiza el último estado del botón
+    if (currentButtonState == HIGH) { // Condición si el botón está presionado
+      startAcquisition = !startAcquisition; // Cambia el estado de adquisición de datos
+      digitalWrite(LED_PIN, startAcquisition ? HIGH : LOW); // Enciende o apaga el led
+      lastDebounceTime = millis(); // Reinicia el temporizador de rebote
+    }
   }
-  lastButtonState = currentButtonState;  // Actualiza el estado anterior del pulsador
+ // Adquisición y envío de datos de los acelerómetros
+  if (startAcquisition && readSensorFlag) {
+    mma1.read(); // Lee los datos del primer acelerómetro
+    mma2.read(); // Lee los datos del segundo acelerómetro
+   // Envío de datos por serial en un formato legible (configurado para verificar en serialplotter)
+   /*
+    Serial.print("A1X:"); Serial.print(mma1.x);
+    Serial.print(" A1Y:"); Serial.print(mma1.y);
+    Serial.print(" A1Z:"); Serial.print(mma1.z);
+    Serial.print(" A2X:"); Serial.print(mma2.x);
+    Serial.print(" A2Y:"); Serial.print(mma2.y);
+    Serial.print(" A2Z:"); Serial.println(mma2.z);
+  */
 
-  if (startAcquisition && readSensorFlag)
-  {
-    mma.read();
+  // Envío de datos por serial en formato de bytes a la Raspberry Pi:
 
-    // Obtener los valores del acelerómetro en formato de dos bytes (int16_t)
-    // los datos del acelerómetro (X, Y, Z) se envían como valores enteros de 16 bits (int16_t), 
-    // lo que significa que cada valor del acelerómetro se representa con 2 bytes. 
-    //Entonces, cuando se transmite un conjunto de datos del acelerómetro (X, Y, Z), se están enviando 6 bytes en total (2 bytes por cada eje).
-    int16_t accelerometerX = mma.x;
-    int16_t accelerometerY = mma.y;
-    int16_t accelerometerZ = mma.z;
+    // Obtener los valores del primer acelerómetro
+    int16_t accelerometer1X = mma1.x;
+    int16_t accelerometer1Y = mma1.y;
+    int16_t accelerometer1Z = mma1.z;
 
-    // Enviar los datos al puerto serie de la Raspberry Pi
+    // Obtener los valores del segundo acelerómetro
+    int16_t accelerometer2X = mma2.x;
+    int16_t accelerometer2Y = mma2.y;
+    int16_t accelerometer2Z = mma2.z;
+  
     Serial.write('!'); // Carácter que indica a la Raspberry Pi iniciar la lectura
-    Serial.write((uint8_t*)&accelerometerX, sizeof(accelerometerX));
-    Serial.write((uint8_t*)&accelerometerY, sizeof(accelerometerY));
-    Serial.write((uint8_t*)&accelerometerZ, sizeof(accelerometerZ));
+    Serial.write((uint8_t*)&accelerometer1X, sizeof(accelerometer1X));
+    Serial.write((uint8_t*)&accelerometer1Y, sizeof(accelerometer1Y));
+    Serial.write((uint8_t*)&accelerometer1Z, sizeof(accelerometer1Z));
+    Serial.write((uint8_t*)&accelerometer2X, sizeof(accelerometer2X));
+    Serial.write((uint8_t*)&accelerometer2Y, sizeof(accelerometer2Y));
+    Serial.write((uint8_t*)&accelerometer2Z, sizeof(accelerometer2Z));
     Serial.write('\n');
-    
-    // Restablecer la bandera 'readSensorFlag'.
-    readSensorFlag = false;
+
+  
+    readSensorFlag = false; // Reinicio de bandera para la próxima lectura
   }
-}
-
-void displayData()
-{
-  // Read the 'raw' data in 14-bit counts
-  mma.read();
-  Serial.print("X:\t"); Serial.print(mma.x); 
-  Serial.print("\tY:\t"); Serial.print(mma.y); 
-  Serial.print("\tZ:\t"); Serial.print(mma.z); 
-  Serial.println();
-
-  /* Get a new sensor event */ 
-  sensors_event_t event; 
-  mma.getEvent(&event);
-
-  /* Display the results (acceleration is measured in m/s^2) */
-  Serial.print("X: \t"); Serial.print(event.acceleration.x); Serial.print("\t");
-  Serial.print("Y: \t"); Serial.print(event.acceleration.y); Serial.print("\t");
-  Serial.print("Z: \t"); Serial.print(event.acceleration.z); Serial.print("\t");
-  Serial.println("m/s^2 ");
-  
-  /* Get the orientation of the sensor */
-  uint8_t o = mma.getOrientation();
-  
-  switch (o) {
-    case MMA8451_PL_PUF: 
-      Serial.println("Portrait Up Front");
-      break;
-    case MMA8451_PL_PUB: 
-      Serial.println("Portrait Up Back");
-      break;    
-    case MMA8451_PL_PDF: 
-      Serial.println("Portrait Down Front");
-      break;
-    case MMA8451_PL_PDB: 
-      Serial.println("Portrait Down Back");
-      break;
-    case MMA8451_PL_LRF: 
-      Serial.println("Landscape Right Front");
-      break;
-    case MMA8451_PL_LRB: 
-      Serial.println("Landscape Right Back");
-      break;
-    case MMA8451_PL_LLF: 
-      Serial.println("Landscape Left Front");
-      break;
-    case MMA8451_PL_LLB: 
-      Serial.println("Landscape Left Back");
-      break;
-    }  
 }
